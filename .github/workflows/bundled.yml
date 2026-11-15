@@ -31,7 +31,7 @@ jobs:
           cd openssl-${{ matrix.openssl }}
           ./config --prefix=$HOME/ossl-${{ matrix.openssl }} \
                    --openssldir=$HOME/ossl-${{ matrix.openssl }}/ssl shared
-          make -j"$(nproc)" >/dev/null 2>&1
+          make -j"$(nproc)" >/dev/null
           make install_sw >/dev/null
 
       - name: Configure
@@ -49,7 +49,7 @@ jobs:
 
       - name: Smoke test CLI
         run: |
-          build/xca --no-gui --version || true
+          build/xca --no-gui --version
           build/xca --no-gui --list-curves | head -3
           build/xca --no-gui --help | grep -q -- --sign-req
 
@@ -77,10 +77,21 @@ jobs:
           EOF
 
       - name: Run Ed25519 token provider test
+        # The harness exercises pkcs11_provider.cpp at runtime
+        # (EVP_DigestSign -> C_Sign); the pkcs11.cpp getPrivateKey()
+        # integration is covered by the XCA build itself.
         run: |
           export SOFTHSM2_CONF=/tmp/softhsm2.conf
           QTDIR=$(qmake6 -query QT_INSTALL_HEADERS)
+          if [ "${{ matrix.openssl }}" = "system" ]; then
+            OSSL_FLAGS=""
+          else
+            OSL=$HOME/ossl-${{ matrix.openssl }}
+            LIBDIR=$(ls -d "$OSL"/lib* 2>/dev/null | head -1)
+            OSSL_FLAGS="-I $OSL/include -L $LIBDIR -Wl,-rpath,$LIBDIR"
+          fi
           g++ -std=c++17 -I lib -I build -I "$QTDIR" -I "$QTDIR/QtCore" \
+            $OSSL_FLAGS \
             test/pkcs11-provider-test.cpp lib/pkcs11_provider.cpp \
             -o provtest -ldl -lcrypto -lQt6Core
           ./provtest
