@@ -1,0 +1,92 @@
+name: bundled
+
+on:
+  push:
+    branches: [bundled]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        openssl: [system, "4.1.0"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential cmake \
+            qt6-base-dev qt6-tools-dev qt6-l10n-tools \
+            libqt6sql6-sqlite python3-sphinx python3-sphinxcontrib.qthelp \
+            softhsm2
+
+      - name: Build OpenSSL ${{ matrix.openssl }}
+        if: matrix.openssl != 'system'
+        run: |
+          curl -sfLO https://github.com/openssl/openssl/releases/download/openssl-${{ matrix.openssl }}/openssl-${{ matrix.openssl }}.tar.gz
+          tar xf openssl-${{ matrix.openssl }}.tar.gz
+          cd openssl-${{ matrix.openssl }}
+          ./config --prefix=$HOME/ossl-${{ matrix.openssl }} \
+                   --openssldir=$HOME/ossl-${{ matrix.openssl }}/ssl shared
+          make -j"$(nproc)" >/dev/null 2>&1
+          make install_sw >/dev/null
+
+      - name: Configure
+        run: |
+          if [ "${{ matrix.openssl }}" = "system" ]; then
+            cmake -B build
+          else
+            cmake -B build \
+              -DOPENSSL_ROOT_DIR=$HOME/ossl-${{ matrix.openssl }} \
+              -DCMAKE_BUILD_RPATH=$HOME/ossl-${{ matrix.openssl }}/lib64
+          fi
+
+      - name: Build XCA
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Smoke test CLI
+        run: |
+          build/xca --no-gui --version || true
+          build/xca --no-gui --list-curves | head -3
+          build/xca --no-gui --help | grep -q -- --sign-req
+
+      - name: Prepare SoftHSM token with an Ed25519 key
+        run: |
+          mkdir -p /tmp/tokens
+          printf 'directories.tokendir = /tmp/tokens\nobjectstore.backend = file\n' > /tmp/softhsm2.conf
+          export SOFTHSM2_CONF=/tmp/softhsm2.conf
+          softhsm2-util --init-token --slot 0 --label xca-test --pin 4321 --so-pin 5678
+          pip install --quiet --break-system-packages python-pkcs11
+          python3 - <<'EOF'
+          import pkcs11
+          lib = pkcs11.lib('/usr/lib/softhsm/libsofthsm2.so')
+          token = [s for s in lib.get_slots()
+                   if pkcs11.SlotFlag.TOKEN_PRESENT in s.flags][0].get_token()
+          session = token.open(rw=True, user_pin='4321')
+          session.generate_keypair(
+              pkcs11.KeyType.EC_EDWARDS,
+              label='ed25519-test',
+              store=True,
+              public_template={pkcs11.Attribute.EC_PARAMS:
+                               bytes([0x06, 0x03, 0x2B, 0x65, 0x70])},
+          )
+          print('token ready')
+          EOF
+
+      - name: Run Ed25519 token provider test
+        run: |
+          export SOFTHSM2_CONF=/tmp/softhsm2.conf
+          QTDIR=$(qmake6 -query QT_INSTALL_HEADERS)
+          g++ -std=c++17 -I lib -I build -I "$QTDIR" \
+            test/pkcs11-provider-test.cpp lib/pkcs11_provider.cpp \
+            -o provtest -ldl -lcrypto -lQt6Core
+          ./provtest
+
+      - name: Upload XCA binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: xca-bundled-openssl-${{ matrix.openssl }}
+          path: build/xca
