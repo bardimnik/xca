@@ -80,7 +80,7 @@ jobs:
         run: |
           export SOFTHSM2_CONF=/tmp/softhsm2.conf
           QTDIR=$(qmake6 -query QT_INSTALL_HEADERS)
-          g++ -std=c++17 -I lib -I build -I "$QTDIR" \
+          g++ -std=c++17 -I lib -I build -I "$QTDIR" -I "$QTDIR/QtCore" \
             test/pkcs11-provider-test.cpp lib/pkcs11_provider.cpp \
             -o provtest -ldl -lcrypto -lQt6Core
           ./provtest
